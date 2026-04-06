@@ -1,0 +1,565 @@
+---
+title: "GTEx startup"
+author: Anna L Tyler
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    collapsed: no
+    toc: yes
+    toc_float: yes
+---
+
+
+I'm going to try looking at the GTEx data here.
+Just more exploration. 
+
+
+
+```{r param}
+rm(list = ls())
+library(here)
+```
+
+```{r load_code}
+all.fun <- list.files(here("Code"), full.names = TRUE)
+for(i in 1:length(all.fun)){source(all.fun[i])}
+```
+
+```{r libraries, message = FALSE, warning = FALSE, error = FALSE}
+needed.libraries <- c("pheatmap", "DT", "gprofiler2", "vioplot", 
+  "VGAM", "parallel", "doParallel")
+load_libraries(needed.libraries)
+```
+
+There is just one big expression matrix, and I'll need 
+to parse out which individuals and tissues each sample
+belongs to. I've also downloaded the meta data for GTEx
+V8
+
+```{r load_data}
+#This chunk takes a little while the first time through
+
+sample.att <- as.matrix(read.delim(here("Data", "GTEx", 
+  "GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt")))
+ind.att <- as.matrix(read.delim(here("Data", "GTEx", 
+  "GTEx_Analysis_v8_Annotations_SubjectPhenotypesDS.txt")))
+
+age.group <- sapply(strsplit(ind.att[,"AGE"], "-"), function(x) round(mean(as.numeric(x))))
+ind.att <- cbind(ind.att, age.group)
+ind.sex <- ind.att[,"SEX"]
+ind.sex[which(ind.att[,"SEX"] == 1)] <- "Male"
+ind.sex[which(ind.att[,"SEX"] == 2)] <- "Female"
+ind.att <- cbind(ind.att, "sex" = ind.sex)
+
+expr.file <- here("Data", "GTEx", "expression_individual.RDS")
+gene.info.file <- here("Data", "GTEx", "info_gene.RDS")
+sample.info.file <- here("Data", "GTEx", "info_sample.RDS")
+if(!file.exists(expr.file)){
+  #reading in this file takes several minutes
+  expr <- read.delim(here("Data", "GTEx", "phASER_WASP_GTEx_v8_matrix.gw_phased.txt"))
+  expr.info <- expr[,1:4]
+  saveRDS(expr.info, gene.info.file)
+  
+  hap.levels <- expr[,5:ncol(expr)]
+
+  sample.id <- gsub(".", "-", colnames(hap.levels), fixed = TRUE)
+  ind.id <- sapply(strsplit(sample.id, "-"), function(x) paste(x[1], x[2], sep = "-"))
+  samp.idx <- sapply(sample.id, function(x) which(sample.att[,1] == x))
+  matched.sample.info <- sample.att[samp.idx,c("SAMPID", "SMTSD")]
+  samp.info <- cbind(ind.id, matched.sample.info)
+  saveRDS(samp.info, sample.info.file)
+
+  #group expression by individual
+  u_ind <- unique(ind.id)
+  #length(u_ind)
+  ind_expr <- lapply(u_ind, function(x) hap.levels[,which(samp.info[,1] == x),drop=FALSE])
+  names(ind_expr) <- u_ind
+
+  #split each individual into two matrices for the two haplotypes
+  #and filter down to genes that are expressed.
+  #this takes about half an hour on a laptop. Go make some tea.
+  hap.expr <- vector(mode = "list", length = length(ind_expr))
+  names(hap.expr) <- u_ind
+  for(i in 1:length(ind_expr)){
+    report.progress(i, length(ind_expr))
+    hap1 <- apply(ind_expr[[i]], 2, 
+      function(x) as.numeric(sapply(strsplit(x, "|", fixed = TRUE), function(y) y[1])))
+    hap2 <- apply(ind_expr[[i]], 2, 
+      function(x) as.numeric(sapply(strsplit(x, "|", fixed = TRUE), function(y) y[2])))
+    rownames(hap1) <- rownames(hap2) <- sapply(strsplit(expr.info[,"name"], ".", fixed = TRUE), function(x) x[1])
+
+    #replace sample IDs with tissue names
+    samp.id <- colnames(hap1) 
+    tissue.id <- samp.info[match(gsub(".", "-", samp.id, fixed = TRUE), samp.info[,"SAMPID"]), "SMTSD"]
+    colnames(hap1) <- colnames(hap2) <- tissue.id
+
+    has.vals1 <- which(rowSums(hap1) > 0)
+    has.vals2 <- which(rowSums(hap2) > 0)
+    has.vals <- union(has.vals1, has.vals2)
+    sub.hap1 <- hap1[has.vals,,drop=FALSE]
+    sub.hap2 <- hap2[has.vals,,drop=FALSE]
+    hap.list <- list("haplotype1" = sub.hap1, "haplotype2" = sub.hap2)
+    hap.expr[[i]] <- hap.list
+  }
+  saveRDS(hap.expr, expr.file)
+}else{
+  hap.expr <- readRDS(expr.file)
+}
+
+
+
+gene.name.file <- here("Data", "GTEx", "gene_name_info.RDS")
+if(!file.exists(gene.name.file)){
+  all_gene <- unique(unlist(lapply(hap.expr, function(x) rownames(x[[1]]))))
+  split.gene <- sapply(strsplit(all_gene, ".", fixed = TRUE), function(x) x[[1]])
+  gene.name.info <- gconvert(split.gene, organism = "hsapiens")
+  saveRDS(gene.name.info, gene.name.file)
+}else{
+  gene.name.info <- readRDS(gene.name.file)
+}
+```
+
+```{r plot_fun}
+
+comp_binom <- function(haplotype.table){
+
+  #remove rows with all zeros or nas
+  not.na <- which(!is.na(rowSums(haplotype.table)))
+  sub.table <- haplotype.table[not.na,]
+  #plot(sub.table)
+  
+  fit.bb <- try(vglm(sub.table ~ 1, family=betabinomial), silent = TRUE)
+  if(class(fit.bb) == "try-error"){
+    return(NA)
+  }
+  fit.b <- vglm(sub.table~1, binomialff)
+  loglik.bb <- logLik(fit.bb)
+  loglik.b <- logLik(fit.b)
+
+  lambda_lr <- (loglik.b - loglik.bb)*-2
+  p <- 1-pchisq(lambda_lr, df = 1)
+  return(p)
+}
+
+test_gene_fit <- function(gene.name, tissue.name = NULL){
+
+  gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
+  if(length(gene.id) == 0){
+    stop(paste("I can't find", gene.name))
+  }
+
+  #get the expression across tissues for each individual
+  hap1.expr <- lapply(hap.expr, function(x) x[[1]][which(rownames(x[[1]]) == gene.id),])
+  hap2.expr <- lapply(hap.expr, function(x) x[[2]][which(rownames(x[[2]]) == gene.id),])
+
+  if(!is.null(tissue.name)){
+    hap1.tissue <- lapply(hap1.expr, function(x) x[grep(tissue.name, names(x), ignore.case = TRUE),drop=FALSE])
+    hap2.tissue <- lapply(hap2.expr, function(x) x[grep(tissue.name, names(x), ignore.case = TRUE),drop=FALSE])
+    plot.label <- paste(gene.name, tissue.name)
+  }else{
+    hap1.tissue <- hap1.expr
+    hap2.tissue <- hap2.expr
+    plot.label <- paste(gene.name, "all tissues")
+  }
+
+  has.vals <- which(sapply(hap1.tissue, length) > 0)
+  paired.haps <- lapply(has.vals, function(x) cbind(hap1.tissue[[x]], hap2.tissue[[x]]))
+  all.hap1 <- Reduce("c", lapply(paired.haps, function(x) x[,1]))
+  all.hap2 <- Reduce("c", lapply(paired.haps, function(x) x[,2]))
+
+  fit.p <- sapply(paired.haps, comp_binom)
+  return(fit.p)
+}
+
+#tests all genes for a given individual
+test_ind_genes <- function(ind_expr, verbose = FALSE){
+  hap1 <- ind_expr[[1]]
+  hap2 <- ind_expr[[2]]
+  if(verbose){
+    gene.p <- unlist(lapply_pb(1:nrow(hap1), function(x) comp_binom(cbind(hap1[x,], hap2[x,]))))
+  }else{
+    gene.p <- sapply(1:nrow(hap1), function(x) comp_binom(cbind(hap1[x,], hap2[x,])))
+  }
+  return(gene.p)
+}
+
+test_par <- function(ind_expr, verbose = FALSE){
+  hap1 <- ind_expr[[1]]
+  hap2 <- ind_expr[[2]]
+
+  haplotype.table <- cbind(hap1[1,], hap2[1,])
+
+  #remove rows with all zeros or nas
+  not.na <- which(!is.na(rowSums(haplotype.table)))
+  sub.table <- haplotype.table[not.na,]
+  #plot(sub.table)
+  #return(sub.table)
+
+  fit.bb <- try(vglm(sub.table ~ 1, family=betabinomial), silent = TRUE)
+  
+  if(class(fit.bb) == "try-error"){
+    return(NA)
+  }
+
+  fit.b <- vglm(sub.table~1, binomialff)
+  loglik.bb <- logLik(fit.bb)
+  loglik.b <- logLik(fit.b)
+
+  lambda_lr <- (loglik.b - loglik.bb)*-2
+  p <- 1-pchisq(lambda_lr, df = 1)
+  return(p)
+  
+}
+
+plot_gene_cor <- function(gene.name, tissue.name = NULL, plot.results = TRUE){
+
+  gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
+  if(length(gene.id) == 0){
+    stop(paste("I can't find", gene.name))
+  }
+
+  #get the expression across tissues for each individual
+  hap1.expr <- lapply(hap.expr, function(x) x[[1]][which(rownames(x[[1]]) == gene.id),])
+  hap2.expr <- lapply(hap.expr, function(x) x[[2]][which(rownames(x[[2]]) == gene.id),])
+
+  if(!is.null(tissue.name)){
+    hap1.tissue <- lapply(hap1.expr, function(x) x[grep(tissue.name, names(x), ignore.case = TRUE),drop=FALSE])
+    hap2.tissue <- lapply(hap2.expr, function(x) x[grep(tissue.name, names(x), ignore.case = TRUE),drop=FALSE])
+    plot.label <- paste(gene.name, tissue.name)
+  }else{
+    hap1.tissue <- hap1.expr
+    hap2.tissue <- hap2.expr
+    plot.label <- paste(gene.name, "all tissues")
+  }
+
+  has.vals <- which(sapply(hap1.tissue, length) > 0)
+  paired.haps <- lapply(has.vals, function(x) cbind(hap1.tissue[[x]], hap2.tissue[[x]]))
+  all.hap1 <- Reduce("c", lapply(paired.haps, function(x) x[,1]))
+  all.hap2 <- Reduce("c", lapply(paired.haps, function(x) x[,2]))
+
+  #test.check <- sapply(paired.haps, comp_binom)
+  #qqunif.plot(test.check)
+  
+  hap.cor <- sapply(paired.haps, function(x) cor(x[,1], x[,2], method = "spearman"))
+  hap.ratios <- lapply(paired.haps, function(x) x[,1]/rowSums(x))
+  
+  if(plot.results){
+    par(mfrow = c(1,3))
+    plot.with.model(all.hap1, all.hap2, xlab = "Haplotype 1", ylab = "Haplotype 2", 
+      pch = 16, main = gene.name, report = "cor.test")
+    hist(hap.cor, xlab = "Spearman correlation", breaks = 50, 
+      main = "Haplotype Correlation", xlim = c(-1, 1))
+    abline(v = 0, col = "red")
+    mtext(plot.label, side = 3, outer = TRUE, line = -1.5, cex = 1.2, font = 2)
+    hist(unlist(hap.ratios), main = "Allele Ratios", xlab = "ratio", xlim = c(0, 1))
+  }
+
+  result <- list("correlations" = hap.cor, "haplotype_counts" = paired.haps,
+    "ratios" = hap.ratios)
+  invisible(result)
+}
+
+get_ind_expr <- function(gene.name, ind.name){
+  gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
+  if(length(gene.id) == 0){
+    stop(paste("I can't find the gene", gene.name))
+  }
+  
+  ind.idx <- which(names(hap.expr)== ind.name)
+  if(length(ind.idx) == 0){
+    stop(paste("I can't find the individual", ind.name))
+  }
+
+  ind.expr <- hap.expr[[ind.idx]]
+  gene.idx <- which(rownames(ind.expr[[1]]) == gene.id)
+  
+  #get the expression across tissues for each individual
+  hap1.expr <- ind.expr[[1]][which(rownames(ind.expr[[1]]) == gene.id),]
+  hap2.expr <- ind.expr[[2]][which(rownames(ind.expr[[2]]) == gene.id),]
+
+  paired.haps <- cbind(hap1.expr, hap2.expr)
+  return(paired.haps)
+}
+```
+
+
+```{r ind_gene_test, eval = FALSE}
+
+
+imprinted.genes <- c("FAM50B", "PXDC1", "GRB10", "PLAGL1", "HYMAI")
+gene.cor <- lapply(imprinted.genes, plot_gene_cor)
+names(gene.cor) <- imprinted.genes
+
+par(mfrow = c(1,2))
+boxplot(lapply(gene.cor, function(x) x[[1]]), main = "Correlations")
+abline(h = c(0, 0.5))
+boxplot(lapply(gene.cor, function(x) x[[2]]), main = "Ratios")
+abline(h = 1)
+
+imprinted <- plot_gene_cor(gene.name = "HYMAI")
+imprinted.p <- test_gene_fit("HYMAI")
+imprinted.fdr <- p.adjust(imprinted.p, method = "BH")
+qqunif.plot(imprinted.fdr)
+which(imprinted.fdr <= 0.1)
+
+plot(-log10(imprinted.fdr), -log10(biallele.fdr))
+
+
+biallele <- plot_gene_cor("GAB1")
+biallele.p <- test_gene_fit("GAB1")
+
+biallele.fdr <- p.adjust(biallele.p, method = "BH")
+qqunif.plot(biallele.fdr)
+which(biallele.fdr <= 0.1)
+
+
+imprinted$haplotype_counts[which(imprinted.fdr <= 0.1)]
+biallele$haplotype_counts[which(biallele.fdr <= 0.1)]
+
+test.mat <- biallele$haplotype_counts[which(biallele.fdr <= 0.1)][[1]]
+pheatmap(test.mat)
+comp_binom(test.mat)
+
+par(mfrow = c(1,2))
+qqunif.plot(biallele.p, plot.label = "biallelic")
+qqunif.plot(imprinted.p, plot.label = "imprinted")
+
+test <- plot_gene_cor("KCNK9")
+plot_gene_cor("KCNK9", tissue.name = "brain")
+
+plot_gene_cor("KL")
+plot_gene_cor("KL", tissue.name = "brain")
+```
+
+
+```{r plot_haps}
+
+plot_expr_as_mat <- function(cor_result, plot.label = ""){
+  hap.result <- cor_result$haplotype_counts
+  ind.idx <- match(names(hap.result), ind.att[,"SUBJID"])
+  
+  ind.sex <- as.factor(ind.att[ind.idx,"sex"])
+  ind.age.group <- as.numeric(ind.att[ind.idx,"age.group"])
+  annot.df <- data.frame("age.group" = rep(ind.age.group, each = 2), 
+    "sex" = rep(ind.sex, each = 2))
+  rownames(annot.df) <- paste(rep(names(hap.result), each = 2), c(1,2), sep = "_")
+  
+  all.tx <- unique(unlist(lapply(hap.result, rownames)))
+
+  all.expr <- vector(mode = "list", length = length(hap.result))
+  names(all.expr) <- names(hap.result)
+
+  for(i in 1:length(hap.result)){
+    ind.mat <- matrix(NA, nrow = length(all.tx), ncol = 2)
+    rownames(ind.mat) <- all.tx
+    tx <- rownames(hap.result[[i]])
+    ind.mat[tx,] <- hap.result[[i]]
+    all.expr[[i]] <- ind.mat
+  }
+
+  ind.order <- order(sapply(all.expr, function(x) mean(x, na.rm = TRUE)))
+  expr.mat <- Reduce("cbind", all.expr[ind.order])
+  colnames(expr.mat) <- rownames(annot.df)
+  row.order <- order(rowMeans(expr.mat, na.rm = TRUE))  
+
+  pheatmap(log10(expr.mat[row.order,]+1), annotation_col = annot.df,
+    cluster_rows = FALSE, cluster_cols = FALSE, main = plot.label, show_colnames = FALSE)
+}
+
+
+plot_deviations <- function(cor_result, main = "", log.transform = TRUE, 
+  plot.results = TRUE, ratio.thresh = 0.9){
+  #collect all haplotypes
+
+  all.haps <- cbind(unlist(lapply(cor_result$haplotype_counts, function(x) x[,1])),
+    unlist(lapply(cor_result$haplotype_counts, function(x) x[,2])))
+  if(log.transform){
+    all.haps <- log10(all.haps+1)
+  }
+  #plot(log10(all.haps+1))
+  ratios <- all.haps[,1]/rowSums(all.haps)
+  above.thresh <- which(ratios >= ratio.thresh)
+  below.thresh <- which(ratios <= 1-ratio.thresh)
+
+  dev.haps <- all.haps[c(names(above.thresh), names(below.thresh)),]
+
+  above.ind <- Reduce("rbind", strsplit(names(above.thresh), ".", fixed = TRUE))
+  below.ind <- Reduce("rbind", strsplit(names(below.thresh), ".", fixed = TRUE)) 
+  skewed.ratios <- rbind(above.ind, below.ind)
+  ordered.table <- skewed.ratios[order(skewed.ratios[,1]),]
+  rownames(ordered.table) <- NULL
+
+  if(plot.results){
+    layout.mat <- matrix(c(1,2,3,4), nrow = 2, byrow = FALSE)
+    layout(layout.mat, widths = c(0.8, 1))
+
+    pt.col <- rep("black", nrow(all.haps))
+    pt.col[above.thresh] <- "red"
+    pt.col[below.thresh] <- "blue"
+    plot(all.haps[,1], all.haps[,2], xlab = "Haplotype 1",
+      ylab = "Haplotype 2", col = pt.col, main = main, pch = 16)
+    abline(0,1)
+    
+    hist(ratios, main = "ratios", xlab = "ratios")
+    abline(v = c(ratio.thresh, 1-ratio.thresh))
+
+    #pheatmap(log10(dev.haps+1))
+    par(mar = c(4, 16, 0, 2))
+    imageWithText(log10(dev.haps+1), show.text = FALSE, 
+      use.pheatmap.colors = TRUE, row.text.shift = 0.5,
+      row.text.cex = 0.7)
+
+    par(mar = c(4, 16, 0, 2))
+    barplot(sort(ratios[c(above.thresh, below.thresh)]), 
+      las = 2, horiz = TRUE, cex.names = 0.7,
+      xlab = "Allele Ratio")
+    plot.dim <- par("usr")
+    segments(x0 = 0.5, y0 = -1, y1 = plot.dim[4]-1)
+
+  }
+  invisible(ordered.table)
+}
+```
+
+```{r ind_tests, eval = FALSE}
+gene.name = "KL"
+#gene.name <- sample(gene.name.info[which(gene.name.info[,"name"] != "None"),"name"], 1)
+#test <- plot_gene_cor(gene.name, "brain")
+#quartz(width = 11, height = 4)
+test <- plot_gene_cor(gene.name)
+#quartz(width = 11, height = 6)
+deviants <- plot_deviations(test, main = gene.name, ratio.thresh = 0.9, 
+  log.transform = TRUE)
+
+
+#quartz(width = 11, height = 6)
+show.max <- min(20, nrow(deviants))
+par(mfrow = c(1,2), mar = c(4,10,4,2))
+barplot(rev(sort(table(deviants[,1]), decreasing = TRUE)[1:show.max]), 
+  las = 2, horiz = TRUE, main = "Individuals with skewed ratios", 
+  xlab = "Tissues", cex.names = 0.8)
+par(mar = c(4,10,4,2))
+barplot(rev(sort(table(deviants[,2]), decreasing = TRUE)[1:show.max]), 
+  las = 2, horiz = TRUE, cex.names = 0.8,
+  main = "Tissues with skewed ratios", xlab = "Individuals")
+mtext(gene.name, outer = TRUE, side = 3, line = -2.5, font = 2, cex = 1.2)
+
+plot_expr_as_mat(test, gene.name)
+
+high.ind <- sort(table(deviants[,1]), decreasing = TRUE)
+all.ind.p <- sapply(names(high.ind), function(x) comp_binom(get_ind_expr(gene.name, x)))
+sig.ind <- which(all.ind.p < 0.00001)
+
+par(mfrow = c(3,3))
+for(i in 1:length(sig.ind)){
+  test.ind <- get_ind_expr(gene.name, names(sig.ind)[i])
+  plot(log10(test.ind), pch = 16, xlim = c(0, 3))
+  text(log10(test.ind[,1]), log10(test.ind[,2]), labels = rownames(test.ind), 
+    pos = 4, cex = 0.5)
+  abline(0,1)
+}
+
+
+test.ratio <- test.ind[,1]/rowSums(test.ind)
+test.ratio <- test.ratio[which(!is.na(test.ratio))]
+ratio.order <- order(test.ratio)
+barplot(test.ratio[ratio.order], las = 2)
+imageWithText(log10(test.ind[ratio.order,]+1), use.pheatmap.colors = TRUE, 
+  show.text = FALSE, row.text.shift = 0.5)
+
+test.age <- as.numeric(ind.att[match(names(test$correlations), 
+  ind.att[,"SUBJID"]), "age.group"])
+mean.expr <- sapply(test$haplotype_counts, function(x) mean(log10(x+1)))
+
+expr.by.age <- lapply(unique(test.age), function(x) mean.expr[which(test.age == x)])
+names(expr.by.age) <- unique(test.age)
+
+cor.by.age <- lapply(unique(test.age), function(x) test$correlations[which(test.age == x)])
+names(cor.by.age) <- unique(test.age)
+
+
+par(mfrow = c(1,2))
+vioplot(expr.by.age, main = "Expression by age", col = "lightgray")
+mtext("age group", side = 1, line = 2.5)
+mtext("log expression", side = 2, line = 2.5)
+stripchart(expr.by.age, vertical = TRUE, method = "jitter", pch = 16, 
+  col = "#dd1c77", add = TRUE, cex = 0.5)
+
+vioplot(cor.by.age, main = "Haplotype correlation by age", col = "lightgray")
+mtext("age group", side = 1, line = 2.5)
+mtext("Spearman correlation", side = 2, line = 2.5)
+stripchart(cor.by.age, vertical = TRUE, method = "jitter", pch = 16, 
+  col = "#dd1c77", add = TRUE, cex = 0.5)
+
+mtext(gene.name, side = 3, outer = TRUE, line = -1.5, cex = 1.2, font = 2)
+```
+
+
+```{r a_few_more, eval = FALSE}
+gene.name <- c("MAPK1", "ARL17A", "PARD6G")
+#gene.name <- sample(gene.name.info[which(gene.name.info[,"name"] != "None"),"name"], 100)
+test.results <- vector(mode = "list", length = length(gene.name))
+names(test.results)  <- gene.name
+
+pdf("~/Desktop/check_genes.pdf", width = 8, height = 4)
+for(i in 1:length(gene.name)){
+  report.progress(i, length(gene.name))
+  test.results[[i]] <- plot_gene_cor(gene.name[i])
+}
+dev.off()
+
+```
+
+the stats tell us if a given gene has biased
+
+allele expression in a single individual (gene x individual)
+  how many genes in each individual have biased expression?
+  in how many individuals does each gene have biased expression?
+
+
+genes x tissues x individuals
+
+for each gene
+  count how many individuals have skew in each tissue
+  
+
+for each individual count how many genes are skewed in each tissue
+for each tissue count 
+
+```{r parallel, eval = FALSE}
+
+matrices <- replicate(1000, matrix(rnorm(100), ncol=10), simplify=FALSE)
+
+sum_matrix <- function(mat) {
+  sum(mat)
+}
+
+# Parallel computation using 4 cores
+cl <- makeCluster(4)
+registerDoParallel(cl)
+clusterExport(cl, "matrices")
+start_time <- Sys.time()
+sums <- foreach(mat = matrices) %dopar% sum_matrix(mat)
+end_time <- Sys.time()
+stopCluster(cl)
+```
+
+```{r comp_all}
+
+
+# Parallel computation using 4 cores
+cl <- makeCluster(4)
+registerDoParallel(cl)
+clusterExport(cl, c("test_ind_genes", "comp_binom", "vglm", "betabinomial", 
+  "binomialff", "logLik", "pchisq", "try"))
+start_time <- Sys.time()
+#all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
+all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
+end_time <- Sys.time()
+stopCluster(cl)
+
+test <- sapply(hap.expr[1:4], function(x) test_par(x))
+
+end_time - start_time
+```

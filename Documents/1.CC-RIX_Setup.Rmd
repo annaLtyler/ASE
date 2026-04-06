@@ -1,0 +1,192 @@
+---
+title: "ASE startup"
+author: Anna L Tyler
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    collapsed: no
+    toc: yes
+    toc_float: yes
+---
+
+
+## Introduction
+The purpose of this workflow is to start looking
+at some CC-RIX mice to assess ASE in adults in 
+a similar way to pmid:28238550, in which they 
+used correlation of allele-specific expression
+across F1 mice to identify genes with biased
+allele expression in bulk-RNASeq from adult 
+tissues.
+
+
+```{r param}
+rm(list = ls())
+library(here)
+```
+
+```{r load_code}
+all.fun <- list.files(here("Code"), full.names = TRUE)
+for(i in 1:length(all.fun)){source(all.fun[i])}
+```
+
+```{r libraries, message = FALSE, warning = FALSE, error = FALSE}
+needed.libraries <- c("pheatmap", "DT")
+load_libraries(needed.libraries)
+```
+
+I am using the GBRS output that Matt Vincent just made
+for an old CGD data set looking at heart and kidneys
+in CC-RIX mice. They will not be heterozygous everywhere,
+and in fact, some of these mice seem to be F1s of the
+same strain, but do have some heterozygosity left. Not
+sure what that's about. Maybe these are still early 
+CC-RIX?
+
+If GBRS is supposed to genotype from RNASeq, how do
+they deal with potential mono-allelic expression?
+I guess, for the most part, this will be extremely 
+rare, and not be consistent across cells, so there
+should always be some of both alleles expressed.
+
+I will start with the kidney data because there
+are more samples.
+
+```{r load_data}
+sample.dir <- "CGD_CCRIX_Kidney_RNASeq"
+file.pattern <- "diploid.genes.expected_read_counts" #calls are identical across animals
+#file.pattern <- "diploid.genes.tpm"
+
+
+sample.sheet <- read.csv(here("Data", sample.dir, "CGD_CCRIX_Kidney_RNASeq.SampleSheet.csv"))
+split.strains <- strsplit(gsub(".fastq.gz", "", basename(sample.sheet[,"fastq_1"])), "_")
+strains <- sapply(split.strains, function(x) x[1])
+u_strain <- unique(strains)
+
+data.files <- sapply(sample.sheet[,1], 
+  function(x) list.files(here("Data", sample.dir, "gbrs_analysis", "output", x, "gbrs"), 
+  pattern = file.pattern, full.names = TRUE))
+
+ase <- lapply(data.files, function(x) as.matrix(read.delim(x)))
+```
+
+There are `r length(u_strain)` unique crosses in this data set:
+
+```{r crosses}
+print(u_strain)
+```
+
+We will look at each one separately. 
+First, we looked at 
+
+
+we identify all transcripts with heterozygous 
+alleles. Then we 
+
+```{r find_hets}
+
+
+number_calls <- function(call.list){
+  geno.cols <- sapply(call.list, function(x) x[,"notes"])
+  #flag any positions that have different calls across animals
+  u_calls <- apply(geno.cols, 1, unique)
+  num.calls <- sapply(u_calls, length)
+  prop.table <- (table(num.calls)/nrow(geno.cols))*100
+
+  unique.hap <- apply(geno.cols, 1, function(x) unique(unlist(strsplit(x, ""))))
+  num.hap <- sapply(unique.hap, length)
+
+  #par(mfrow = c(1,2))
+  barplot_with_num(signif(prop.table, 2), ylab = "Percent",  
+    xlab = "Number of different genotypes")
+
+  hist(num.hap, xlab = "Haplotypes", main = "")
+}
+
+find_hets <- function(call.list, min.count = 10){
+  
+
+  geno.cols <- sapply(call.list, function(x) x[,"notes"])
+  
+  #filter to sites for which all animals have the same call
+  #we'll call these high-confidence sites, although, we should
+  #investigate why some sites have different calls.
+  same.call <- apply(geno.cols, 1, function(x) all(x == x[1]))
+  all.same <- length(which(same.call))/nrow(geno.cols)
+
+  sub.geno <- geno.cols[which(same.call),]
+  sub.counts <- lapply(call.list, function(x) apply(x[which(same.call), LETTERS[1:8]], 2, as.numeric))
+  #name rows with gene names
+  for(i in 1:length(sub.counts)){
+    rownames(sub.counts[[i]]) <- call.list[[i]][which(same.call),1]
+  }
+
+  #filter out genes for which there was no call for any 
+  has.call <- which(sub.geno[,1] != "None")
+  filtered.geno <- sub.geno[has.call,]
+  filtered.counts <- lapply(sub.counts, function(x) x[has.call,])
+
+  #find heterozygous sites
+  unique.hap <- apply(filtered.geno, 1, function(x) unique(unlist(strsplit(x, ""))))
+  num.hap <- sapply(unique.hap, length)
+  #hist(num.hap)
+  het.idx <- which(num.hap == 2)
+  #length(het.idx)
+
+  het.counts <- lapply(filtered.counts, function(x) x[het.idx,])
+
+  #convert to a list of matrices with counts for all alleles
+  allele.counts <- lapply(1:nrow(het.counts[[1]]), function(x) sapply(het.counts, function(y) t(y[x,])))
+  names(allele.counts) <- rownames(het.counts[[1]])
+  #rownames disappeared, add them back
+  for(i in 1:length(allele.counts)){
+    rownames(allele.counts[[i]]) <- LETTERS[1:8]
+  }
+
+  #remove genes with counts that are too los
+  count.sum <- sapply(allele.counts, function(x) log(sum(x)+1))
+  #hist(count.sum)
+  keep.genes <- which(count.sum > min.count)
+
+  has.counts <- allele.counts[keep.genes]
+
+  final.counts <- lapply(has.counts, function(x) x[which(rowSums(x) > 0),])
+  #WTF, these are all identical. There's no variation at all! I don't think
+  #expected counts is what I want...
+  return(final.counts)  
+}
+```
+
+I first just looked at how many different genotype calls
+there were across supposedly isogenic animals. There are
+an alarmingly high number of different calls. For three
+of the crosses there are more sites with two different 
+calls than with only one. Why is this?
+
+```{r count_hets, fig.height = 4, fig.width = 8}
+for(i in 1:length(u_strain)){
+  par(mfrow = c(1,2))
+  cross.idx <- which(strains == u_strain[i])
+  number_calls(call.list = ase[cross.idx])
+  mtext(u_strain[i], side = 3, line = -1.5, outer = TRUE)
+}
+```
+
+
+For now, I guess I'll restrict my analysis to 
+only sites for which all animals have the same 
+call.
+
+
+```{r get_hets}
+cross_hets <- vector(mode = "list", length = length(u_strain))
+names(cross_hets) <- u_strain
+for(i in 1:length(u_strain)){
+  cross.idx <- which(strains == u_strain[i])
+  cross_hets[[i]] <- find_hets(call.list = ase[cross.idx])
+}
+```
+
+What the heck! These numbers look so strange. I don't understand
+what all of this stuff is, but it is not what I need. 
