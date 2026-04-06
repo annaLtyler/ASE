@@ -1581,7 +1581,8 @@ library(here)</code></pre>
 <pre><code>## here() starts at /Users/atyler/Documents/Projects/ASE</code></pre>
 <pre class="r"><code>all.fun &lt;- list.files(here(&quot;Code&quot;), full.names = TRUE)
 for(i in 1:length(all.fun)){source(all.fun[i])}</code></pre>
-<pre class="r"><code>needed.libraries &lt;- c(&quot;pheatmap&quot;, &quot;DT&quot;, &quot;gprofiler2&quot;, &quot;vioplot&quot;, &quot;VGAM&quot;)
+<pre class="r"><code>needed.libraries &lt;- c(&quot;pheatmap&quot;, &quot;DT&quot;, &quot;gprofiler2&quot;, &quot;vioplot&quot;, 
+  &quot;VGAM&quot;, &quot;parallel&quot;, &quot;doParallel&quot;)
 load_libraries(needed.libraries)</code></pre>
 <p>There is just one big expression matrix, and I’ll need to parse out
 which individuals and tissues each sample belongs to. I’ve also
@@ -1716,6 +1717,45 @@ test_gene_fit &lt;- function(gene.name, tissue.name = NULL){
   return(fit.p)
 }
 
+#tests all genes for a given individual
+test_ind_genes &lt;- function(ind_expr, verbose = FALSE){
+  hap1 &lt;- ind_expr[[1]]
+  hap2 &lt;- ind_expr[[2]]
+  if(verbose){
+    gene.p &lt;- unlist(lapply_pb(1:nrow(hap1), function(x) comp_binom(cbind(hap1[x,], hap2[x,]))))
+  }else{
+    gene.p &lt;- sapply(1:nrow(hap1), function(x) comp_binom(cbind(hap1[x,], hap2[x,])))
+  }
+  return(gene.p)
+}
+
+test_par &lt;- function(ind_expr, verbose = FALSE){
+  hap1 &lt;- ind_expr[[1]]
+  hap2 &lt;- ind_expr[[2]]
+
+  haplotype.table &lt;- cbind(hap1[1,], hap2[1,])
+
+  #remove rows with all zeros or nas
+  not.na &lt;- which(!is.na(rowSums(haplotype.table)))
+  sub.table &lt;- haplotype.table[not.na,]
+  #plot(sub.table)
+  #return(sub.table)
+
+  fit.bb &lt;- try(vglm(sub.table ~ 1, family=betabinomial), silent = TRUE)
+  
+  if(class(fit.bb) == &quot;try-error&quot;){
+    return(NA)
+  }
+
+  fit.b &lt;- vglm(sub.table~1, binomialff)
+  loglik.bb &lt;- logLik(fit.bb)
+  loglik.b &lt;- logLik(fit.b)
+
+  lambda_lr &lt;- (loglik.b - loglik.bb)*-2
+  p &lt;- 1-pchisq(lambda_lr, df = 1)
+  return(p)
+  
+}
 
 plot_gene_cor &lt;- function(gene.name, tissue.name = NULL, plot.results = TRUE){
 
@@ -2003,17 +2043,34 @@ does each gene have biased expression?</p>
 <p>for each gene count how many individuals have skew in each tissue</p>
 <p>for each individual count how many genes are skewed in each tissue
 for each tissue count</p>
-<pre class="r"><code>all_ratios &lt;- lapply(hap.expr, function(x) x[[1]]/(x[[1]]+x[[2]]))
-num.high.genes.per.tissue &lt;- lapply(all_ratios, function(x) apply(x, 2, function(y) length(which(y &gt; 0.9))))
-num.low.genes.per.tissue &lt;- lapply(all_ratios, function(x) apply(x, 2, function(y) length(which(y &lt; 0.1))))
+<pre class="r"><code>matrices &lt;- replicate(1000, matrix(rnorm(100), ncol=10), simplify=FALSE)
 
-u_tissue &lt;- unique(unlist(lapply(hap.expr, function(x) colnames(x[[1]]))))
-ratio_mat &lt;- matrix(NA, nrow = length(u_tissue), ncol = length(hap.expr))
-colnames(ratio_mat) &lt;- names(hap.expr)
-rownames(ratio_mat) &lt;- u_tissue
-for(i in 1:length(all_ratios)){
-  ratio_mat[colnames(all_ratios[[i]]),i] &lt;- all_ratios[[i]]
-}</code></pre>
+sum_matrix &lt;- function(mat) {
+  sum(mat)
+}
+
+# Parallel computation using 4 cores
+cl &lt;- makeCluster(4)
+registerDoParallel(cl)
+clusterExport(cl, &quot;matrices&quot;)
+start_time &lt;- Sys.time()
+sums &lt;- foreach(mat = matrices) %dopar% sum_matrix(mat)
+end_time &lt;- Sys.time()
+stopCluster(cl)</code></pre>
+<pre class="r"><code># Parallel computation using 4 cores
+cl &lt;- makeCluster(4)
+registerDoParallel(cl)
+clusterExport(cl, c(&quot;test_ind_genes&quot;, &quot;comp_binom&quot;, &quot;vglm&quot;, &quot;betabinomial&quot;, 
+  &quot;binomialff&quot;, &quot;logLik&quot;, &quot;pchisq&quot;, &quot;try&quot;))
+start_time &lt;- Sys.time()
+#all_p &lt;- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
+all_p &lt;- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
+end_time &lt;- Sys.time()
+stopCluster(cl)
+
+
+end_time - start_time</code></pre>
+<pre><code>## Time difference of 7.518575 mins</code></pre>
 
 
 

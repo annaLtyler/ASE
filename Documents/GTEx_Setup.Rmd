@@ -549,17 +549,15 @@ stopCluster(cl)
 
 
 # Parallel computation using 4 cores
-cl <- makeCluster(4)
+cl <- makeCluster(detectCores()-1)
 registerDoParallel(cl)
 clusterExport(cl, c("test_ind_genes", "comp_binom", "vglm", "betabinomial", 
   "binomialff", "logLik", "pchisq", "try"))
-start_time <- Sys.time()
 #all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
 all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
-end_time <- Sys.time()
 stopCluster(cl)
 
-test <- sapply(hap.expr[1:4], function(x) test_par(x))
+saveRDS()
 
-end_time - start_time
+
 ```
