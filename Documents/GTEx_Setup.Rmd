@@ -536,11 +536,12 @@ all_p_file <- here("Results", "processed_data", "Individual_Gene_P_values.RDS")
 
 if(!file.exists(all_p_file)){
   # Parallel computation using 4 cores
-  cl <- makeCluster(detectCores()-1)
+  #cl <- makeCluster(detectCores()-1)
+  cl <- makeCluster(4)
   registerDoParallel(cl)
   clusterExport(cl, c("test_ind_genes", "comp_binom", "vglm", "betabinomial", 
     "binomialff", "logLik", "pchisq", "try"))
-  all_p <- foreach(ind_expr = hap.expr[1:7]) %dopar% test_ind_genes(ind_expr)
+  all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
   #all_p <- foreach(ind_expr = hap.expr) %dopar% test_ind_genes(ind_expr)
   stopCluster(cl)
   saveRDS(all_p, all_p_file)
