@@ -181,6 +181,8 @@ test_ind_genes <- function(ind_expr, verbose = FALSE){
   }else{
     gene.p <- sapply(1:nrow(hap1), function(x) comp_binom(cbind(hap1[x,], hap2[x,])))
   }
+  names(gene.p) <- rownames(hap1)
+  gene.p <- gene.p[which(!is.na(gene.p))]
   return(gene.p)
 }
 
@@ -527,23 +529,6 @@ for each gene
 for each individual count how many genes are skewed in each tissue
 for each tissue count 
 
-```{r parallel, eval = FALSE}
-
-matrices <- replicate(1000, matrix(rnorm(100), ncol=10), simplify=FALSE)
-
-sum_matrix <- function(mat) {
-  sum(mat)
-}
-
-# Parallel computation using 4 cores
-cl <- makeCluster(4)
-registerDoParallel(cl)
-clusterExport(cl, "matrices")
-start_time <- Sys.time()
-sums <- foreach(mat = matrices) %dopar% sum_matrix(mat)
-end_time <- Sys.time()
-stopCluster(cl)
-```
 
 ```{r comp_all}
 
@@ -555,13 +540,22 @@ if(!file.exists(all_p_file)){
   registerDoParallel(cl)
   clusterExport(cl, c("test_ind_genes", "comp_binom", "vglm", "betabinomial", 
     "binomialff", "logLik", "pchisq", "try"))
-  #all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
-  all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
+  all_p <- foreach(ind_expr = hap.expr[1:7]) %dopar% test_ind_genes(ind_expr)
+  #all_p <- foreach(ind_expr = hap.expr) %dopar% test_ind_genes(ind_expr)
   stopCluster(cl)
   saveRDS(all_p, all_p_file)
 }else{
   all_p <- readRDS(all_p_file)
 }
+```
 
 
+```{r process_p}
+adj.p <- lapply(all_p, function(x) p.adjust(x, "BH"))
+sig.p <- lapply(adj.p, function(x) which(x <= 0.1))
+#sapply(sig.p, length)
+plotVenn(sig.p)
+sim.mat <- jaccard.matrix(sig.p)
+diag(sim.mat) <- NA
+pheatmap(sim.mat)
 ```
