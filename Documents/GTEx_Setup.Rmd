@@ -121,6 +121,21 @@ if(!file.exists(gene.name.file)){
 ```
 
 ```{r plot_fun}
+gene_name <- function(gene.id = NULL, gene.name = NULL){
+  if(is.null(gene.id)){
+    gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
+    if(length(gene.id) == 0){
+      stop(paste("I can't find the gene", gene.name))
+    }
+  }
+  if(is.null(gene.name)){
+    gene.name <- gene.name.info[which(gene.name.info[,"target"] == gene.id),"name"]
+    if(length(gene.name) == 0){
+      stop(paste("I can't find the gene", gene.id))
+    }
+  }
+  result <- c("name" = as.character(gene.name), "id" = as.character(gene.id))
+} 
 
 comp_binom <- function(haplotype.table){
 
@@ -142,13 +157,12 @@ comp_binom <- function(haplotype.table){
   return(p)
 }
 
-test_gene_fit <- function(gene.name, tissue.name = NULL){
+test_gene_fit <- function(gene.name = NULL, gene.id = NULL, tissue.name = NULL){
 
-  gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
-  if(length(gene.id) == 0){
-    stop(paste("I can't find", gene.name))
-  }
-
+  gene.info <- gene_name(gene.id, gene.name)
+  gene.name <- gene.info["name"]
+  gene.id <- gene.info["id"]
+  
   #get the expression across tissues for each individual
   hap1.expr <- lapply(hap.expr, function(x) x[[1]][which(rownames(x[[1]]) == gene.id),])
   hap2.expr <- lapply(hap.expr, function(x) x[[2]][which(rownames(x[[2]]) == gene.id),])
@@ -186,40 +200,13 @@ test_ind_genes <- function(ind_expr, verbose = FALSE){
   return(gene.p)
 }
 
-test_par <- function(ind_expr, verbose = FALSE){
-  hap1 <- ind_expr[[1]]
-  hap2 <- ind_expr[[2]]
 
-  haplotype.table <- cbind(hap1[1,], hap2[1,])
+plot_gene_cor <- function(gene.name = NULL, gene.id = NULL, 
+  tissue.name = NULL, plot.results = TRUE){
 
-  #remove rows with all zeros or nas
-  not.na <- which(!is.na(rowSums(haplotype.table)))
-  sub.table <- haplotype.table[not.na,]
-  #plot(sub.table)
-  #return(sub.table)
-
-  fit.bb <- try(vglm(sub.table ~ 1, family=betabinomial), silent = TRUE)
-  
-  if(class(fit.bb) == "try-error"){
-    return(NA)
-  }
-
-  fit.b <- vglm(sub.table~1, binomialff)
-  loglik.bb <- logLik(fit.bb)
-  loglik.b <- logLik(fit.b)
-
-  lambda_lr <- (loglik.b - loglik.bb)*-2
-  p <- 1-pchisq(lambda_lr, df = 1)
-  return(p)
-  
-}
-
-plot_gene_cor <- function(gene.name, tissue.name = NULL, plot.results = TRUE){
-
-  gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
-  if(length(gene.id) == 0){
-    stop(paste("I can't find", gene.name))
-  }
+  gene.info <- gene_name(gene.id, gene.name)
+  gene.name <- gene.info["name"]
+  gene.id <- gene.info["id"]
 
   #get the expression across tissues for each individual
   hap1.expr <- lapply(hap.expr, function(x) x[[1]][which(rownames(x[[1]]) == gene.id),])
@@ -262,11 +249,12 @@ plot_gene_cor <- function(gene.name, tissue.name = NULL, plot.results = TRUE){
   invisible(result)
 }
 
-get_ind_expr <- function(gene.name, ind.name){
-  gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
-  if(length(gene.id) == 0){
-    stop(paste("I can't find the gene", gene.name))
-  }
+get_ind_expr <- function(gene.name = NULL, gene.id = NULL, 
+  ind.name, plot.results = FALSE){
+
+  gene.info <- gene_name(gene.id, gene.name)
+  gene.name <- gene.info["name"]
+  gene.id <- gene.info["id"]
   
   ind.idx <- which(names(hap.expr)== ind.name)
   if(length(ind.idx) == 0){
@@ -281,6 +269,16 @@ get_ind_expr <- function(gene.name, ind.name){
   hap2.expr <- ind.expr[[2]][which(rownames(ind.expr[[2]]) == gene.id),]
 
   paired.haps <- cbind(hap1.expr, hap2.expr)
+
+  if(plot.results){
+    xlim <- c(min(hap1.expr, na.rm = TRUE), (max(hap1.expr, na.rm = TRUE)*1.1))
+    plot(hap1.expr, hap2.expr, xlab = "Haplotype 1", ylab = "Haplotype 2",
+      pch = 16, main = gene.name, xlim = xlim)    
+    text(hap1.expr, hap2.expr, labels = names(hap1.expr), cex = 0.6, 
+      pos = 4)
+    abline(0,1)
+  }
+
   return(paired.haps)
 }
 ```
@@ -537,13 +535,13 @@ all_p_file <- here("Results", "processed_data", "Individual_Gene_P_values.RDS")
 if(!file.exists(all_p_file)){
   # Parallel computation using 4 cores
   #cl <- makeCluster(detectCores()-1)
-  #cl <- makeCluster(4)
-  cl <- makeCluster(20)
+  cl <- makeCluster(4)
+  #cl <- makeCluster(20)
   registerDoParallel(cl)
   clusterExport(cl, c("test_ind_genes", "comp_binom", "vglm", "betabinomial", 
     "binomialff", "logLik", "pchisq", "try"))
-  #all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
-  all_p <- foreach(ind_expr = hap.expr) %dopar% test_ind_genes(ind_expr)
+  all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
+  #all_p <- foreach(ind_expr = hap.expr) %dopar% test_ind_genes(ind_expr)
   stopCluster(cl)
   saveRDS(all_p, all_p_file)
 }else{
@@ -552,12 +550,40 @@ if(!file.exists(all_p_file)){
 ```
 
 
-```{r process_p}
+```{r process_p, eval = FALSE}
 adj.p <- lapply(all_p, function(x) p.adjust(x, "BH"))
-sig.p <- lapply(adj.p, function(x) which(x <= 0.1))
+sig.p <- lapply(adj.p, function(x) which(x <= 1e-6))
+#names(sig.p) <- names(hap.expr)[1:4]
 #sapply(sig.p, length)
 plotVenn(sig.p)
 sim.mat <- jaccard.matrix(sig.p)
 diag(sim.mat) <- NA
 pheatmap(sim.mat)
+
+ind.idx = 1; gene.idx <- 5
+gene.info <- gene_name(gene.name = NULL, gene.id = names(sig.p[[ind.idx]])[gene.idx])
+par(mfrow = c(1,1))
+ind.haps <- get_ind_expr(gene.id = gene.info["id"], 
+  ind.name = names(sig.p)[ind.idx], plot.results = TRUE)
+cor.result <- plot_gene_cor(gene.name = gene.info["name"])
+plot_expr_as_mat(cor.result)
+plot_deviations(cor.result, main = gene.info["name"])
+
+u_genes <- unique(unlist(lapply(sig.p, names)))
+sig.count <- colSums(sapply(u_genes, function(x) sapply(sig.p, function(y) length(which(names(y) == x)))))
+barplot(sig.count)
+
+high.sig <- which(sig.count > 3)
+gene.test <- test_gene_fit(gene.id = names(high.sig)[1], tissue.name = NULL)
+qqunif.plot(gene.test)
+length(which(gene.test <= 1e-6))
+length(which(is.na(gene.test)))
 ```
+
+recalculate p values for just brain 
+
+Questions for when p values are done.
+For each gene, how many people have sig p values (taking into account
+  which individuals actually had that gene measured)
+
+  
