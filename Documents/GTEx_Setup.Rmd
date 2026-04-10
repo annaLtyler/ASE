@@ -28,14 +28,17 @@ for(i in 1:length(all.fun)){source(all.fun[i])}
 
 ```{r libraries, message = FALSE, warning = FALSE, error = FALSE}
 needed.libraries <- c("pheatmap", "DT", "gprofiler2", "vioplot", 
-  "VGAM", "parallel", "doParallel")
+  "VGAM", "parallel", "doParallel", "igraph")
 load_libraries(needed.libraries)
 ```
 
-There is just one big expression matrix, and I'll need 
-to parse out which individuals and tissues each sample
-belongs to. I've also downloaded the meta data for GTEx
-V8
+There is just one big expression matrix. Here we parse 
+out which individuals and tissues each sample belongs 
+to. I've also downloaded the meta data for GTEx V8.
+
+We filtered out genes with low read counts (<10) and 
+expressed too few tissues (<3).
+
 
 ```{r load_data}
 #This chunk takes a little while the first time through
@@ -77,7 +80,8 @@ if(!file.exists(expr.file)){
   names(ind_expr) <- u_ind
 
   #split each individual into two matrices for the two haplotypes
-  #and filter down to genes that are expressed.
+  #and filter down to genes that are expressed in at least three
+  #tissues with at least 10 reads in each tissue.
   #this takes about half an hour on a laptop. Go make some tea.
   hap.expr <- vector(mode = "list", length = length(ind_expr))
   names(hap.expr) <- u_ind
@@ -94,42 +98,71 @@ if(!file.exists(expr.file)){
     tissue.id <- samp.info[match(gsub(".", "-", samp.id, fixed = TRUE), samp.info[,"SAMPID"]), "SMTSD"]
     colnames(hap1) <- colnames(hap2) <- tissue.id
 
-    has.vals1 <- which(rowSums(hap1) > 0)
-    has.vals2 <- which(rowSums(hap2) > 0)
-    has.vals <- union(has.vals1, has.vals2)
-    sub.hap1 <- hap1[has.vals,,drop=FALSE]
-    sub.hap2 <- hap2[has.vals,,drop=FALSE]
-    hap.list <- list("haplotype1" = sub.hap1, "haplotype2" = sub.hap2)
+    enough.tissues1 <- which(apply(hap1, 1, function(x) length(which(x > 0))) >= 3)
+    enough.tissues2 <- which(apply(hap2, 1, function(x) length(which(x > 0))) >= 3)
+    enough.tx.idx <- union(enough.tissues1, enough.tissues2)
+
+    if(length(enough.tx.idx) == 0){
+      next()
+    }
+
+    sub.hap1 <- hap1[enough.tx.idx,]
+    sub.hap2 <- hap2[enough.tx.idx,]
+
+    enough.counts1 <- which(rowSums(sub.hap1) >= 10)
+    enough.counts2 <- which(rowSums(sub.hap2) >= 10)
+    enough.counts.idx <- union(enough.counts1, enough.counts2)
+
+    if(length(enough.counts.idx) == 0){
+      next()
+    }
+
+    filtered.hap1 <- sub.hap1[enough.counts.idx,]
+    filtered.hap2 <- sub.hap2[enough.counts.idx,]
+
+    #head(filtered.hap1)
+    #head(filtered.hap2)
+    #idx = 2;cbind(filtered.hap1[idx,], filtered.hap2[idx,])
+    #comp_binom(cbind(filtered.hap1[idx,], filtered.hap2[idx,]))
+
+    hap.list <- list("haplotype1" = filtered.hap1, "haplotype2" = filtered.hap2)
     hap.expr[[i]] <- hap.list
   }
-  saveRDS(hap.expr, expr.file)
+  #some individuals have fewer than 3 tissues sampled
+  #make sure we only include with enough tissues
+  has.vals <- which(sapply(hap.expr, length) > 0)
+  saveRDS(hap.expr[has.vals], expr.file)
 }else{
   hap.expr <- readRDS(expr.file)
+  gene.loc.info <- readRDS(gene.info.file)
 }
 
-
-
-gene.name.file <- here("Data", "GTEx", "gene_name_info.RDS")
+gene.name.file <- here("Data", "GTEx", "gene_info.RDS")
 if(!file.exists(gene.name.file)){
   all_gene <- unique(unlist(lapply(hap.expr, function(x) rownames(x[[1]]))))
   split.gene <- sapply(strsplit(all_gene, ".", fixed = TRUE), function(x) x[[1]])
-  gene.name.info <- gconvert(split.gene, organism = "hsapiens")
-  saveRDS(gene.name.info, gene.name.file)
+  #gene.info <- gconvert(split.gene, organism = "hsapiens")
+  gene.info <- get_gene_info(geneID = split.gene, IDtype = "ensembl_gene_id",
+    organism = "human")
+  saveRDS(gene.info, gene.name.file)
 }else{
-  gene.name.info <- readRDS(gene.name.file)
+  gene.info <- readRDS(gene.name.file)
 }
 ```
+
+
+
 
 ```{r plot_fun}
 gene_name <- function(gene.id = NULL, gene.name = NULL){
   if(is.null(gene.id)){
-    gene.id <- gene.name.info[which(gene.name.info[,"name"] == gene.name),"target"]
+    gene.id <- gene.info[which(gene.info[,"external_gene_name"] == gene.name)[1],"ensembl_gene_id"]
     if(length(gene.id) == 0){
       stop(paste("I can't find the gene", gene.name))
     }
   }
   if(is.null(gene.name)){
-    gene.name <- gene.name.info[which(gene.name.info[,"target"] == gene.id),"name"]
+    gene.name <- gene.info[which(gene.info[,"ensembl_gene_id"] == gene.id)[1],"external_gene_name"]
     if(length(gene.name) == 0){
       stop(paste("I can't find the gene", gene.id))
     }
@@ -142,7 +175,12 @@ comp_binom <- function(haplotype.table){
   #remove rows with all zeros or nas
   not.na <- which(!is.na(rowSums(haplotype.table)))
   sub.table <- haplotype.table[not.na,]
-  #plot(sub.table)
+  #high.table <- sub.table[which(rowSums(sub.table) >= 10),]
+  #plot(high.table)
+  #ratios <- high.table[,1]/rowSums(high.table)
+  #hist(ratios)
+  #total.count <- rowSums(high.table)
+  #plot(total.count+1, ratios, log = "xy")
   
   fit.bb <- try(vglm(sub.table ~ 1, family=betabinomial), silent = TRUE)
   if(class(fit.bb) == "try-error"){
@@ -187,9 +225,15 @@ test_gene_fit <- function(gene.name = NULL, gene.id = NULL, tissue.name = NULL){
 }
 
 #tests all genes for a given individual
-test_ind_genes <- function(ind_expr, verbose = FALSE){
+test_ind_genes <- function(ind_expr, tissue = NULL, verbose = FALSE){
   hap1 <- ind_expr[[1]]
   hap2 <- ind_expr[[2]]
+  if(!is.null(tissue)){
+    tissue.idx <- grep(tissue, colnames(hap1), ignore.case = TRUE)
+    if(length(tissue.idx) <= 5){
+      return(NA)
+    }
+  }
   if(verbose){
     gene.p <- unlist(lapply_pb(1:nrow(hap1), function(x) comp_binom(cbind(hap1[x,], hap2[x,]))))
   }else{
@@ -424,9 +468,6 @@ plot_deviations <- function(cor_result, main = "", log.transform = TRUE,
 
 ```{r ind_tests, eval = FALSE}
 gene.name = "KL"
-#gene.name <- sample(gene.name.info[which(gene.name.info[,"name"] != "None"),"name"], 1)
-#test <- plot_gene_cor(gene.name, "brain")
-#quartz(width = 11, height = 4)
 test <- plot_gene_cor(gene.name)
 #quartz(width = 11, height = 6)
 deviants <- plot_deviations(test, main = gene.name, ratio.thresh = 0.9, 
@@ -498,7 +539,6 @@ mtext(gene.name, side = 3, outer = TRUE, line = -1.5, cex = 1.2, font = 2)
 
 ```{r a_few_more, eval = FALSE}
 gene.name <- c("MAPK1", "ARL17A", "PARD6G")
-#gene.name <- sample(gene.name.info[which(gene.name.info[,"name"] != "None"),"name"], 100)
 test.results <- vector(mode = "list", length = length(gene.name))
 names(test.results)  <- gene.name
 
@@ -527,6 +567,9 @@ for each gene
 for each individual count how many genes are skewed in each tissue
 for each tissue count 
 
+```{r testing, eval = FALSE}
+test <- test_ind_genes(hap.expr[[1]])
+```
 
 ```{r comp_all}
 
@@ -549,41 +592,343 @@ if(!file.exists(all_p_file)){
 }
 ```
 
+```{r just_brain, eval = FALSE}
 
-```{r process_p, eval = FALSE}
-adj.p <- lapply(all_p, function(x) p.adjust(x, "BH"))
-sig.p <- lapply(adj.p, function(x) which(x <= 1e-6))
-#names(sig.p) <- names(hap.expr)[1:4]
-#sapply(sig.p, length)
-plotVenn(sig.p)
-sim.mat <- jaccard.matrix(sig.p)
-diag(sim.mat) <- NA
-pheatmap(sim.mat)
+brain_p_file <- here("Results", "processed_data", "Individual_Gene_P_values_brain.RDS")
 
-ind.idx = 1; gene.idx <- 5
-gene.info <- gene_name(gene.name = NULL, gene.id = names(sig.p[[ind.idx]])[gene.idx])
-par(mfrow = c(1,1))
-ind.haps <- get_ind_expr(gene.id = gene.info["id"], 
-  ind.name = names(sig.p)[ind.idx], plot.results = TRUE)
-cor.result <- plot_gene_cor(gene.name = gene.info["name"])
-plot_expr_as_mat(cor.result)
-plot_deviations(cor.result, main = gene.info["name"])
-
-u_genes <- unique(unlist(lapply(sig.p, names)))
-sig.count <- colSums(sapply(u_genes, function(x) sapply(sig.p, function(y) length(which(names(y) == x)))))
-barplot(sig.count)
-
-high.sig <- which(sig.count > 3)
-gene.test <- test_gene_fit(gene.id = names(high.sig)[1], tissue.name = NULL)
-qqunif.plot(gene.test)
-length(which(gene.test <= 1e-6))
-length(which(is.na(gene.test)))
+if(!file.exists(brain_p_file)){
+  # Parallel computation using 4 cores
+  #cl <- makeCluster(detectCores()-1)
+  #cl <- makeCluster(4)
+  cl <- makeCluster(20)
+  registerDoParallel(cl)
+  clusterExport(cl, c("test_ind_genes", "comp_binom", "vglm", "betabinomial", 
+    "binomialff", "logLik", "pchisq", "try"))
+  #all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
+  brain_p <- foreach(ind_expr = hap.expr) %dopar% test_ind_genes(ind_expr)
+  stopCluster(cl)
+  saveRDS(all_p, all_p_file)
+}else{
+  all_p <- readRDS(all_p_file)
+}
 ```
 
-recalculate p values for just brain 
 
-Questions for when p values are done.
-For each gene, how many people have sig p values (taking into account
-  which individuals actually had that gene measured)
+```{r alpha_thresh}
+alpha.thresh <- 1e-6
+```
 
+## Number of biased genes per individual
+
+There were many genes, even at a very conservative,
+threshold that had significantly biased gene expression
+(adjusted p < `r alpha.thresh`).
+The histogram below shows the distribution of biased
+genes per individual.
+
+Most people had fewer than 1000 biased genes, but 
+some had many more. 
+
+```{r process_p}
+adj.p <- lapply(all_p, function(x) p.adjust(x, "BH"))
+sig.p <- lapply(adj.p, function(x) which(x <= alpha.thresh))
+names(adj.p) <- names(sig.p) <- names(hap.expr)
+num.sig <- sapply(sig.p, length)
+hist(num.sig, breaks = 50, 
+  main = "Number of biased genes per individual", xlab = "Number of genes")
+```
+
+## Cause of the inter-individual variation
+
+The main driver of the number of genes identified
+as having biased expression, seems to be the number
+of tissues that were measured. Having more tissues
+measured gives you greater power to detect biased
+gene expression. The plot below shows how the number
+of biased genes changes as a function of the number
+of tissues measured. The relationship is very strong,
+although there are also some crazy outliers.
+
+This means that in order to look at inter-individual
+variation in the number of biased genes, we'll need
+to do some different statistics. We could re-sample
+at a lower rate, but this will result in a lot of
+false negatives. What about an adaptive p value 
+threshold that takes into account the number of 
+tissues measured in each person? That seems as if 
+it risks a lot of false positives...
+
+Could we do some combination of those things? 
+
+```{r bias_by_ind}
+num.tissues <- sapply(hap.expr, function(x) ncol(x[[1]]))
+boxplot(num.sig~num.tissues,
+  ylab = "Number of Biased Genes", xlab = "Number of Tissues")
+model <- lm(num.sig~num.tissues)
+abline(model, lwd = 2, col = "#de2d26")
+
+
+#brain.idx <- sapply(hap.expr, function(x) grep("brain", colnames(x[[1]]), ignore.case = TRUE))
+#num.brain <- sapply(brain.idx, length)
+#hist(num.brain)
+```
+
+## Adaptive p values
+
+Below we look at what kinds of thresholds it would 
+take to even out the number of biased genes per individual.
+
+```{r num_detect}
+med.num <- round(median(sapply(num.sig, median)))
+```
+
+The plot below shows at what p value cutoff you can detect
+`r med.num` genes (which is the median number of genes
+detected across all patients at p = `r alpha.thresh`) 
+as a function of the number of tissues sampled.
+
+The horizontal line shows the cutoff p = 0.01.
+
+```{r adaptive_p}
+
+find_thresh <- function(pV, target.num){
+  sorted.p <- sort(pV, decreasing = FALSE)
+  #plot(-log10(sorted.p+1e-17))
+  #abline(v = target.num)
+  target.p <- sorted.p[round(target.num)]
+  return(target.p)
+}
+
+adaptive.thresh <- sapply(adj.p, function(x) find_thresh(x, med.num))
+#hist(-log10(adaptive.thresh+1e-17), breaks = 50)
+
+
+plot.with.model(num.tissues, -log10(adaptive.thresh+1e-17),
+  xlab = "Number of tissues", ylab = "-log10(p)", 
+  main = paste("Threshold to detect", med.num, "genes"))
+abline(h = -log10(0.01))
+
+```
+
+What if we look at the p value distributions for a 
+given gene? 
+```{r p_by_gene}
+tissue.num <- sapply(hap.expr, function(x) ncol(x[[1]]))
+
+#gene.name = "MAPK1"
+#gene.name <- sample(gene.info[,"external_gene_name"], 1)
+
+#get gene ID
+gene.id.info <- gene_name(gene.name = gene.name)
+#find p value indices for the gene
+gene.idx <- sapply(adj.p, function(x) which(names(x) == gene.id.info["id"]))
+has.vals <- which(sapply(gene.idx, length) > 0)
+gene.p <- unlist(sapply(adj.p, function(x) x[which(names(x) == gene.id.info["id"])]))
+
+#numbers of subjects in which the gene was detected and had a significant p value
+detected.in <- length(gene.p)
+sig.in <- length(which(gene.p <= 1e-6))
+
+#collect all haplotype counts for this gene
+all.gene.haps <- lapply(1:length(gene.idx), 
+  function(x) if(length(gene.idx[[x]]) > 0){cbind(hap.expr[[x]][[1]][gene.idx[[x]],], hap.expr[[x]][[2]][gene.idx[[x]],])})
+
+#get the average counts for this gene across all tissues in each subject
+avg.count <- sapply(all.gene.haps, function(x) if(length(x) > 0){mean(x)}else{NA})
+#hist(avg.count)
+#low.count <- which(avg.count < 1)
+#all.gene.haps[[low.count[1]]]
+
+#make a table of all haplotype counts together
+hap.table <- Reduce("rbind", all.gene.haps)
+high.haps <- hap.table[which(rowSums(hap.table) >= 10),]
+
+
+if(detected.in > 10){
+  par(mfrow = c(2,2))
+
+  #qq plot for p values
+  qqunif.plot(test);abline(h = 6)
+
+  #plot of p values vs. number of tissues in each subj.
+  plot.with.model(tissue.num[has.vals], -log10(gene.p+1e-17), xlab = "number of tissues",
+    ylab = "-log10(p)")
+
+  #haplotypes counted against each other
+  plot(high.haps, xlab = "Haplotype 1", ylab = "Haplotype 2",
+    main = gene.name)
+  abline(0,1)
+
+  #see where the significant p values are coming from.
+  #tissues with low counts, or high counts
+  plot(avg.count[which(!is.na(avg.count))], 
+    -log10(test+1e-17), xlab = "Avg read count across tissues",
+    ylab = "-log10(p)", pch = 16)
+
+  #plot.text(paste("Found in", detected.in, 
+  #  "people\nSignificant in", sig.in,
+  #  "people:\n", signif((sig.in/detected.in)*100, 2), "percent"))
+
+    mtext(gene.name, outer = TRUE, side = 3, line = -1.5, font = 2, cex = 1.2)
+}
+```
+
+Also, each of these people has different tissues measured,
+which could affect which genes are detected, but I think 
+we probably can't worry about that. 
+
+```{r max_p}
+max.p <- 0.01
+```
+
+## Implementing adaptive p value
+
+The plot below shows the number of significantly biased
+genes, if we use the p value threshold derived from the
+number of tissues sampled. We set a maximum adjusted 
+p value threshold at `r max.p`.
+
+There is no longer a relationship between the number of 
+significantly biased genes and the number of tissues
+sampled. I'm not sure if this is valid...
+
+```{r set_thresh}
+model <- lm(-log10(adaptive.thresh+1e-17)~num.tissues)
+coefs <- coef(model)
+thresh.by.tissue <- sapply(1:40, function(x) (coefs[2]*x)+coefs[1])
+p.by.tissue <- 10^(thresh.by.tissue*-1)
+p.by.tissue[which(p.by.tissue > max.p)] <- max.p
+#set a threshold for each individual based on the number
+#of tissues they had measured
+ind.thresh <- sapply(num.tissues, function(x) p.by.tissue[x])
+
+new.sig <- lapply(1:length(adj.p), function(x) which(adj.p[[x]] <= ind.thresh[x]))
+names(new.sig) <- names(sig.p)
+num.new.sig <- sapply(new.sig, length)
+#hist(num.new.sig, breaks = 50)
+
+plot.with.model(num.tissues, num.new.sig, xlab = "Number of tissues",
+ylab = "Number of significantly biased genes")
+```
+
+## No relationship with bias and sex or age
+
+The plots below show that there is no relationship
+between the number of significantly biased genes and
+age or sex. I'm showing the log10 of significantly
+biased genes, because some individuals have huge
+numbers.
+
+```{r age_bias}
+ind.idx <- match(names(new.sig), ind.att[,1])
+vioplot(log10(num.new.sig+1)~as.numeric(ind.att[ind.idx,"age.group"]),
+  xlab = "age group", ylab = "log10 Number of significantly biased genes",
+  main = "No difference in biased gene count by age")
+
+vioplot(log10(num.new.sig+1)~as.factor(ind.att[ind.idx,"sex"]),
+  xlab = "sex", ylab = "Number of significantly biased genes",
+  main = "No difference in biased gene count by sex")
+```
+
+## Number of shared genes
+
+The histogram below shows how many individuals have 
+biased expression in each gene. The vast majority
+are only biased in a single individual.
+
+```{r common_genes}
+u_genes <- unique(unlist(lapply(new.sig, names)))
+gene.chr <- gene.info[match(u_genes, gene.info[,"ensembl_gene_id"]),"chromosome_name"]
+
+inc.mat <- matrix(0, nrow = length(new.sig), ncol = length(u_genes))
+rownames(inc.mat) <- names(new.sig)
+colnames(inc.mat) <- u_genes
+for(i in 1:length(new.sig)){
+  inc.mat[i,names(new.sig[[i]])] <- 1
+}
+genes.shared <- colSums(inc.mat)
+hist(genes.shared, breaks = 50, xlab = "Number of individuals",
+  main = 'Number of individuals sharing n biased genes')
+```
+
+Not surprisingly, this distribution is close to a power
+law, but not quite.
+
+```{r power}
+num.shared <- 1:max(genes.shared)
+shared.by <- sapply(num.shared, function(x) length(which(genes.shared == x)))
+#plot(num.shared, shared.by, log = "xy")
+plot(log(num.shared+1), log(shared.by+1), 
+  xlab = "log number of individuals sharing the gene",
+  ylab = "log number of genes")
+
+test <- lm(log(shared.by+1)~log(num.shared+1))
+#summary(test)
+abline(test)
+```
+
+The number of genes shared by at least n people is
+shown below. The horizontal line shows y = 100.
+
+```{r shared_genes}
+#collect all genes shared by each number of individuals
+shared.genes <- lapply(1:max(num.shared), function(x) colnames(inc.mat)[which(genes.shared == x)])
+names(shared.genes) <- 1:max(num.shared)
+
+
+#make lists of genes with at least x number of individuals sharing biased expression
+count.shared <- 10:500
+at.least.some <- lapply(count.shared, function(x) unlist(shared.genes[x:length(shared.genes)]))
+at.least.num <- sapply(at.least.some, length)
+names(at.least.num) <- count.shared
+plot(count.shared, at.least.num, xlab = "Number of individuals",
+  ylab = "Number of genes")
+abline(h = 100)
+```
+
+## Enrichments for shared genes {.tabset .tabset-fade .tabset-pills}
+
+The enrichment plots below show functional enrichments
+for biased genes shared by at least n people. There
+are a lot of extracellular enrichments in the less
+shared genes, and a lot of immunological enrichments
+in the more shared genes.
+
+```{r enrich_num, fig.width = 7, fig.height = 7, results = "asis"}
+for(i in seq(200, 500, 100)){
+  cat("###", i, "genes\n")
+  enrich <- gost(at.least.some[[which(count.shared == i)]], 
+    organism = "hsapiens", sources = c("GO", "KEGG", "HPA"))
+  plot.enrichment(enrich, num.terms = 30, 
+    plot.label = paste("Biased genes shared by at least", i, "people"))
+  cat("\n\n")
+}
+```
+
+
+```{r nets, eval = FALSE}
+genes.which <- at.least.some[[which(count.shared == 200)]]
+
+#pheatmap(inc.mat[,genes.which], show_rownames = FALSE)
+plot.decomp(inc.mat[,genes.which], 
+  color.by = ind.att[match(rownames(inc.mat), ind.att[,1]),"sex",drop=FALSE]) #dots are individuals
   
+plot.decomp(t(inc.mat[,genes.which])) #dots are genes
+
+inc.net <- graph_from_incidence_matrix(inc.mat[,genes.which])
+inc.proj <- bipartite_projection(inc.net)
+
+ind.proj <- inc.proj[[1]]
+gene.proj <- inc.proj[[2]]
+
+degree(ind.proj)
+degree(gene.proj)
+
+```
+
+```{r enrich}
+#too many! Even 10 takes a long time
+#ind.enrich <- lapply(lapply(new.sig, names)[1:10], function(x) gost(x, organism = "hsapiens"))
+#plot.enrichment.group(ind.enrich)
+
+```
