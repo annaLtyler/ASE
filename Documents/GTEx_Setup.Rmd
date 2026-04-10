@@ -225,14 +225,23 @@ test_gene_fit <- function(gene.name = NULL, gene.id = NULL, tissue.name = NULL){
 }
 
 #tests all genes for a given individual
-test_ind_genes <- function(ind_expr, tissue = NULL, verbose = FALSE){
+test_ind_genes <- function(ind_expr, tissue = NULL, min.tx = 3, min.count = 10, verbose = FALSE){
   hap1 <- ind_expr[[1]]
   hap2 <- ind_expr[[2]]
   if(!is.null(tissue)){
     tissue.idx <- grep(tissue, colnames(hap1), ignore.case = TRUE)
-    if(length(tissue.idx) <= 5){
+    tx.hap1 <- hap1[,tissue.idx]
+    tx.hap2 <- hap2[,tissue.idx]
+    if(length(tissue.idx) < min.tx){
       return(NA)
     }
+    #re-run filters if subsetting. All genes should be expressed in the tissue
+    #subset and have a minimum number of tissues available.
+    all.hap.tables <- lapply(1:nrow(tx.hap1), function(x) cbind(tx.hap1[x,], tx.hap2[x,]))
+    num.tx.expr <- sapply(all.hap.tables, function(x) length(which(rowSums(x) > min.count)))
+    enough.tx <- which(num.tx.expr >= min.tx)
+    hap1 <- tx.hap1[enough.tx,]
+    hap2 <- tx.hap2[enough.tx,]
   }
   if(verbose){
     gene.p <- unlist(lapply_pb(1:nrow(hap1), function(x) comp_binom(cbind(hap1[x,], hap2[x,]))))
@@ -569,6 +578,9 @@ for each tissue count
 
 ```{r testing, eval = FALSE}
 test <- test_ind_genes(hap.expr[[1]], verbose = TRUE)
+
+test.brain <- test_ind_genes(hap.expr[[1]], tissue = "brain", min.tx = 3, min.count = 10, verbose = TRUE)
+test.brain <- test_ind_genes(hap.expr[[6]], tissue = "brain", min.tx = 3, min.count = 10, verbose = TRUE)
 ```
 
 ```{r comp_all}
@@ -590,6 +602,7 @@ if(!file.exists(all_p_file)){
 }else{
   all_p <- readRDS(all_p_file)
 }
+
 ```
 
 ```{r just_brain, eval = FALSE}
@@ -607,9 +620,9 @@ if(!file.exists(brain_p_file)){
   #all_p <- foreach(ind_expr = hap.expr[1:4]) %dopar% test_ind_genes(ind_expr)
   brain_p <- foreach(ind_expr = hap.expr) %dopar% test_ind_genes(ind_expr)
   stopCluster(cl)
-  saveRDS(all_p, all_p_file)
+  saveRDS(brain_p, brain_p_file)
 }else{
-  all_p <- readRDS(all_p_file)
+  brain_p <- readRDS(brain_p_file)
 }
 ```
 
