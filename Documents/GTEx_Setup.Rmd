@@ -568,7 +568,7 @@ for each individual count how many genes are skewed in each tissue
 for each tissue count 
 
 ```{r testing, eval = FALSE}
-test <- test_ind_genes(hap.expr[[1]])
+test <- test_ind_genes(hap.expr[[1]], verbose = TRUE)
 ```
 
 ```{r comp_all}
