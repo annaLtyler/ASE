@@ -30,14 +30,17 @@ for(i in 1:length(all.fun)){source(all.fun[i])}
 needed.libraries <- c("pheatmap", "DT", "gprofiler2", "vioplot", 
   "VGAM", "parallel", "doParallel", "igraph")
 load_libraries(needed.libraries)
+
+min.tissue <- 3
+min.count <- 10
 ```
 
 There is just one big expression matrix. Here we parse 
 out which individuals and tissues each sample belongs 
 to. I've also downloaded the meta data for GTEx V8.
 
-We filtered out genes with low read counts (<10) and 
-expressed too few tissues (<3).
+We filtered out genes with low read counts (<`r min.count`) and 
+expressed too few tissues (<`r min.tissue`).
 
 
 ```{r load_data}
@@ -98,8 +101,8 @@ if(!file.exists(expr.file)){
     tissue.id <- samp.info[match(gsub(".", "-", samp.id, fixed = TRUE), samp.info[,"SAMPID"]), "SMTSD"]
     colnames(hap1) <- colnames(hap2) <- tissue.id
 
-    enough.tissues1 <- which(apply(hap1, 1, function(x) length(which(x > 0))) >= 3)
-    enough.tissues2 <- which(apply(hap2, 1, function(x) length(which(x > 0))) >= 3)
+    enough.tissues1 <- which(apply(hap1, 1, function(x) length(which(x > 0))) >= min.tissue)
+    enough.tissues2 <- which(apply(hap2, 1, function(x) length(which(x > 0))) >= min.tissue)
     enough.tx.idx <- union(enough.tissues1, enough.tissues2)
 
     if(length(enough.tx.idx) == 0){
@@ -109,8 +112,8 @@ if(!file.exists(expr.file)){
     sub.hap1 <- hap1[enough.tx.idx,]
     sub.hap2 <- hap2[enough.tx.idx,]
 
-    enough.counts1 <- which(rowSums(sub.hap1) >= 10)
-    enough.counts2 <- which(rowSums(sub.hap2) >= 10)
+    enough.counts1 <- which(rowSums(sub.hap1) >= min.count)
+    enough.counts2 <- which(rowSums(sub.hap2) >= min.count)
     enough.counts.idx <- union(enough.counts1, enough.counts2)
 
     if(length(enough.counts.idx) == 0){
